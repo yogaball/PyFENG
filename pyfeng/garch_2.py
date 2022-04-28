@@ -222,22 +222,30 @@ class GarchCapriotti2018(GarchCondMcABC, abc.ABC):
     is used to simulate the variances following GARCH diffusion model.
 
     References:
-        - Capriotti, L., Jiang, Y., & Shaimerdenova, G. (2019).
-            Approximation methods for inhomogeneous geometric Brownian motion.
-            International Journal of Theoretical and Applied Finance, 22(02), 1850055.
+        - Capriotti, L., Jiang, Y., & Shaimerdenova, G. (2019). Approximation methods for inhomogeneous geometric Brownian motion. International Journal of Theoretical and Applied Finance, 22(02), 1850055. https://doi.org/10.1142/S0219024918500553
+
+    Examples:
+        >>> import pyfeng as pfex
+        >>> model = pfex.GarchCapriotti2018(sigma_0=0.2, mr=4, vov=0.1, rho=-0.7, intr=0.09531)
+        >>> model.price(100, 100, texp=1)
+        18.65366146106055
+        >>> model = pfex.GarchCapriotti2018(0.25, mr=8, vov=0.3, rho=-0.6, intr=0.09531)
+        >>> model.price(np.array([90, 100, 110]), 100, texp=1)
+        array([27.1704681 , 22.39104395, 18.40571641])
     """
     var_0 = 0.06
     sigma_0 = np.sqrt(var_0)
 
     def __init__(self, order=3, sigma_0=sigma_0, vov=0.6, rho=0.5, mr=0.1, theta=0.04,
+                 intr=0.0, divr=0.0,
                  n_path=10000, dt=0.05, rn_seed=None, antithetic=True):
-        super().__init__(sigma=sigma_0, vov=vov, rho=rho, mr=mr, theta=theta)
+        super().__init__(sigma=sigma_0, vov=vov, rho=rho, mr=mr, theta=theta, intr=intr, divr=divr)
         self.set_mc_params(n_path=n_path, dt=dt, rn_seed=rn_seed, antithetic=antithetic)
         self.order = order
 
     def _transition_density_logvar(self, x, x0, t, n: int = 3):
         """
-        Transition density of log(var_t).
+        Transition density of x:=log(var_t).
         f(0, T, x0, x) = 1/sqrt(2pi sigma^2 T) * exp(-(x-x0)^2/(2sigma^2 T) - W(x,x0,T) )      (2.5)
         Args:
             x: log(var_t)
@@ -256,7 +264,7 @@ class GarchCapriotti2018(GarchCondMcABC, abc.ABC):
 
     def transition_density_var(self, var_t, t, var_0, t0=0, n: int = 3):
         """
-        Get transition density of var at time t.
+        Get transition density of var_t.
         At time t, pdf(Var_t) is
         f(y) = 1/y * ( 1/sqrt(2*pi) * exp(-(x-x0)^2/(2*sima^2*t) - W(x,x0)) )       (2.4)&(2.5)
         where, x = ln(y)
@@ -268,7 +276,7 @@ class GarchCapriotti2018(GarchCondMcABC, abc.ABC):
             n: orders
 
         Returns:
-            pdf of var
+            pdf of var_t
         """
         x = np.log(var_t)
         x0 = np.log(var_0)
@@ -278,12 +286,13 @@ class GarchCapriotti2018(GarchCondMcABC, abc.ABC):
 
     def _get_c(self, t, var_0, t0=0, num: int = 2000, order=3):
         """
-        To identify the threshold c satisfying f(x)/g(x) <= c, for all x.
+        To identify the threshold C satisfying f(x)/g(x) <= c, for all x.
         Args:
             t: current time
             var_0: last variance
             t0: last time
             num: 1/2 number of samples to calculate the maximum c numerically.
+                Here var_0 should be avoided because of the infinity at var=var_0.
 
         Returns:
             c : float
@@ -293,20 +302,25 @@ class GarchCapriotti2018(GarchCondMcABC, abc.ABC):
         self.yvals = yvals
         xvals = np.log(yvals)
         wvals = w_for_density(self.mr, self.theta, self.vov, xvals, np.log(var_0_mean), t - t0, n=order)
+        idx_wvals_overflow = wvals < -3
+        if idx_wvals_overflow.any():
+            wvals[idx_wvals_overflow] = w_at_x0(self.mr, self.theta, self.vov,
+                                                xvals[idx_wvals_overflow], t - t0, n=order)
         c = np.exp(-np.min(wvals)) + 1
         return c
 
     def rv(self, t, var_0, t0=0, order=3):
         """
-        Sampling in terms of the other normal distribution.
-        1. identify C: f(x)/g(x) <= C
+        Sampling in terms of the other normal distribution according to the following steps:
+        1. identify C: f(x)/g(x) <= C, for all x
         2. draw X, U independently from f(x) and uniform
         3. compare U < f(X)/( C g(X) )
-            => X' = X
+            => Target X' = X
         Args:
             t: current time t
             var_0: last variance
             t0: last time
+            order: the highest order of expansion formula
 
         Returns:
             y_target: random variable sigma^2_t
@@ -330,7 +344,7 @@ class GarchCapriotti2018(GarchCondMcABC, abc.ABC):
             z = np.random.randn(x0.size, num)*self.vov * np.sqrt(t - t0) + x0[:, None]
             u = np.random.uniform(0, 1, size=(x0.size, num))
             fg = w_for_density(self.mr, self.theta, self.vov, z, x0[:, None], t - t0, order)
-            idx_overflow = fg < -3
+            idx_overflow = fg < -3  # to skip those too small fg causing running overflow in exp(-fg)
             if idx_overflow.any():
                 fg[idx_overflow] = w_at_x0(self.mr, self.theta, self.vov, z[idx_overflow], t - t0, n=order)
             fgu = np.exp(-fg) / u
